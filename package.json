@@ -1,0 +1,49 @@
+{
+  "name": "gitstress",
+  "version": "0.11.0",
+  "description": "Pure CLI and core concurrency bottleneck diagnostic engine for GitStress (npx gitstress .).",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/gitstress/gitstress.git"
+  },
+  "homepage": "https://github.com/gitstress/gitstress#readme",
+  "bugs": {
+    "url": "https://github.com/gitstress/gitstress/issues"
+  },
+  "main": "src/core/analyzer.ts",
+  "bin": {
+    "gitstress": "./dist/gitstress.js"
+  },
+  "files": [
+    "dist",
+    "bin",
+    "src"
+  ],
+  "scripts": {
+    "build": "node scripts/build.js",
+    "prepublishOnly": "npm run build",
+    "cli": "tsx ./bin/gitstress.ts",
+    "verify": "tsx ./bin/gitstress.ts verify",
+    "test": "tsx ./gauntlet/runner.ts && tsx test/queuing_network_test.ts && tsx test/multiline_orm_test.ts"
+  },
+  "keywords": [
+    "gitstress",
+    "cli",
+    "bottleneck",
+    "concurrency",
+    "queuing-network",
+    "mean-value-analysis",
+    "postgres",
+    "demand-propagation"
+  ],
+  "author": "kilopal",
+  "license": "Apache-2.0",
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.20.4",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3"
+  }
+}

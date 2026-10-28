@@ -187,8 +187,8 @@ export async function GET(req: Request) {
 
       // Verify Tier 1 Evidence metrics contain exposure
       assert.ok(report.culprit.evidenceTiers);
-      assert.ok(report.culprit.evidenceTiers.tier1.metrics.routeExposure);
-      assert.ok(report.culprit.evidenceTiers.tier1.metrics.blastRadius);
+      assert.ok(report.culprit.evidenceTiers!.tier1.metrics?.routeExposure);
+      assert.ok(report.culprit.evidenceTiers!.tier1.metrics?.blastRadius);
 
       // Verify terminal card output includes EXPOSURE badge
       const terminalCard = renderTerminalCard(report);

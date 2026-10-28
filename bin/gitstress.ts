@@ -51,7 +51,7 @@ Predict which line dies first under concurrency before you deploy.
 }
 
 if (args.includes('--version') || args.includes('-v')) {
-  console.log('gitstress v0.11.0');
+  console.log('gitstress v0.12.0');
   process.exit(0);
 }
 

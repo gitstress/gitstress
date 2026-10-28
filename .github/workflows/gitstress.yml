@@ -67,23 +67,26 @@ jobs:
             const fix = report.remediation || 'CREATE INDEX CONCURRENTLY ...';
             const headroom = report.headroomMultiplier ? `+${report.headroomMultiplier}x` : '+10x';
 
-            const commentBody = `### GitStress Concurrency Diagnostic Gate
-| Metric | Diagnostic Result |
-| :--- | :--- |
-| **Culprit Symbol** | \`${culprit}\` |
-| **Call Site** | \`${file}\` |
-| **Saturation Knee** | **${failsAt}** |
-| **Predicted Headroom** | **${headroom}** |
-
-<details>
-<summary>Recommended Concurrency Remediation</summary>
-
-\`\`\`sql
-${fix}
-\`\`\`
-</details>
-
-*Automated verification via GitStress v0.11.0 Closed Operational Queuing Network Solver.*`;
+            const commentBody = [
+              '### GitStress Concurrency Diagnostic Gate',
+              '',
+              '| Metric | Diagnostic Result |',
+              '| :--- | :--- |',
+              `| **Culprit Symbol** | \`${culprit}\` |`,
+              `| **Call Site** | \`${file}\` |`,
+              `| **Saturation Knee** | **${failsAt}** |`,
+              `| **Predicted Headroom** | **${headroom}** |`,
+              '',
+              '<details>',
+              '<summary>Recommended Concurrency Remediation</summary>',
+              '',
+              '```sql',
+              fix,
+              '```',
+              '</details>',
+              '',
+              '*Automated verification via GitStress v0.12.0 Closed Operational Queuing Network Solver.*'
+            ].join('\n');
 
             github.rest.issues.createComment({
               issue_number: context.issue.number,

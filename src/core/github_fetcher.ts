@@ -455,7 +455,7 @@ async function fetchViaRawProbing(
  */
 function selectPriorityFiles(paths: string[]): string[] {
   const composeRegex = /(^|\/)(docker-compose|compose)\.ya?ml$/i;
-  const dockerfileRegex = /(^|\/)dockerfile(\..+)?$/i;
+  const dockerfileRegex = /(^|\/)dockerfile(\.[a-zA-Z0-9_\-]+)?$/i;
   const schemaRegex = /(^|\/)(schema\.prisma|schema\.sql|\.prisma)$/i;
   const migrationsRegex = /(^|\/)(migrations?|supabase\/migrations)\/.*\.sql$/i;
   const manifestRegex = /(^|\/)(package\.json|requirements\.txt|pyproject\.toml|go\.mod|Cargo\.toml|Gemfile)$/i;
@@ -475,8 +475,11 @@ function selectPriorityFiles(paths: string[]): string[] {
     if (/\.(test|spec)\.(ts|js|py|go)|__tests__|__mocks__|\.d\.ts$/i.test(p)) continue;
     if (/\.(md|png|jpg|svg|json|yaml)$/i.test(p) && !composeRegex.test(p) && !manifestRegex.test(p)) continue;
 
+    // Reject source code files accidentally matching dockerfile (e.g. dockerfile.ts, dockerfile.js)
+    const isCodeFile = /\.(ts|tsx|js|jsx|py|go|rs|rb|php|java|cs|c|cpp|h)$/i.test(p);
+
     if (composeRegex.test(p)) composes.push(p);
-    else if (dockerfileRegex.test(p)) dockerfiles.push(p);
+    else if (dockerfileRegex.test(p) && !isCodeFile) dockerfiles.push(p);
     else if (schemaRegex.test(p) || migrationsRegex.test(p)) schemas.push(p);
     else if (manifestRegex.test(p)) manifests.push(p);
     else if (entrypointRegex.test(p)) entrypoints.push(p);

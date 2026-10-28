@@ -8,6 +8,7 @@
  */
 
 import type { RouteExposureInfo, RouteExposureTier } from './types';
+export type { RouteExposureInfo, RouteExposureTier };
 
 /**
  * Classifies an endpoint route and source file into an operational exposure tier.

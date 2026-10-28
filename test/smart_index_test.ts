@@ -102,12 +102,12 @@ console.log('=== Running Smart Composite & Partial Index Tests ===\n');
     dialect: 'postgresql'
   });
 
-  assert(rec.ormFix?.prisma?.includes('@@index([threadId, createdAt(sort: Desc)]'), 'Prisma schema @@index syntax formatted');
-  assert(rec.ormFix?.laravel?.includes("$table->index(['thread_id', 'created_at']"), 'Laravel migration $table->index formatted');
-  assert(rec.ormFix?.django?.includes("models.Index(fields=['thread_id', '-created_at']"), 'Django Meta.indexes formatted with desc prefix');
-  assert(rec.ormFix?.django?.includes("condition=Q(status = 'unread')"), 'Django Meta.indexes contains Q condition for partial index');
-  assert(rec.ormFix?.rails?.includes("add_index :messages, [:thread_id, :created_at]"), 'Rails add_index formatted');
-  assert(rec.ormFix?.rails?.includes("algorithm: :concurrently"), 'Rails add_index uses concurrent algorithm');
+  assert(Boolean(rec.ormFix?.prisma?.includes('@@index([threadId, createdAt(sort: Desc)]')), 'Prisma schema @@index syntax formatted');
+  assert(Boolean(rec.ormFix?.laravel?.includes("$table->index(['thread_id', 'created_at']")), 'Laravel migration $table->index formatted');
+  assert(Boolean(rec.ormFix?.django?.includes("models.Index(fields=['thread_id', '-created_at']")), 'Django Meta.indexes formatted with desc prefix');
+  assert(Boolean(rec.ormFix?.django?.includes("condition=Q(status = 'unread')")), 'Django Meta.indexes contains Q condition for partial index');
+  assert(Boolean(rec.ormFix?.rails?.includes("add_index :messages, [:thread_id, :created_at]")), 'Rails add_index formatted');
+  assert(Boolean(rec.ormFix?.rails?.includes("algorithm: :concurrently")), 'Rails add_index uses concurrent algorithm');
 }
 
 // Test 5: End-to-End Parser AST Extraction
@@ -130,7 +130,7 @@ console.log('=== Running Smart Composite & Partial Index Tests ===\n');
   ];
 
   const findings = parseSourceCode(files, {
-    dialectInfo: { dialect: 'postgresql', version: '15' }
+    dialectInfo: { dialect: 'postgresql', autoIndexesForeignKeys: false, notes: '' }
   });
 
   assert(findings.length > 0, 'Found unindexed query in OrderController');

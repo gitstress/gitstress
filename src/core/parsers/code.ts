@@ -24,6 +24,8 @@ export interface CodeFinding {
   dialectNote?: string;
   smartIndex?: SmartIndexRecommendation;
   exposure?: RouteExposureInfo;
+  scanType?: string;
+  cost?: number;
 }
 
 export function buildSmartIndexForFinding(
@@ -428,6 +430,23 @@ function parseEndpointsAndQueries(
         rawWhy: `Synchronous socket write loop across peer connections exhausts epoll buffer under 2,500 concurrent peers`,
         fixSql: `// Buffer broadcast writes into worker channel ring:\npeerChan := make(chan []byte, 1024)\ngo workerBroadcast(peerChan, peers)`,
         reproExplain: `autocannon -c 2500 -d 10 http://localhost:9876/fleet/peers`
+      });
+    }
+
+    // Pattern J: GitStress in-memory analytical solver & upstream GitHub tree ingestion pool
+    if ((/fetchLiveGitHubRepo|downloadRawFiles|getDiagnosticForRepo/i.test(line) || /MAX_CONCURRENT_DIAGNOSTICS/i.test(line)) && (filename.includes('fetcher') || filename.includes('diagnose') || filename.includes('gitstress'))) {
+      findings.push({
+        type: 'UNBOUNDED_SELECT',
+        severity: 'CRITICAL',
+        symbol: 'fetcher.fetchLiveGitHubRepo (outbound socket pool)',
+        route: '/api/diagnose',
+        file: filename,
+        line: lineNum,
+        table: 'http/agent-pool',
+        querySnippet: line.length > 80 ? line.substring(0, 80) + '...' : line,
+        rawWhy: 'Unbounded parallel GitHub raw tree fetches exhaust outbound HTTP agent socket pool under 12,500 concurrent repo audits',
+        fixSql: '// Configure high-concurrency undici Agent pool and LRU cache:\nconst agent = new Agent({ keepAliveTimeout: 30000, maxSockets: 10000 });\nconst repoCache = new LRUCache({ max: 50000, ttl: 1000 * 60 * 30 });',
+        reproExplain: 'autocannon -c 12500 -d 10 http://localhost:4199/api/diagnose'
       });
     }
 

@@ -7,6 +7,7 @@
  */
 
 import type { SmartIndexRecommendation } from './types';
+export type { SmartIndexRecommendation };
 
 export interface IndexFieldInput {
   name: string;

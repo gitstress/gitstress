@@ -209,3 +209,5 @@ export interface ConcurrencyThreshold {
   baseLatencyMs: number;
   p99AtFailMs: number;
 }
+
+export type { CodeFinding } from './parsers/code';

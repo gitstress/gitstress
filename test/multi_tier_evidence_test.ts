@@ -14,37 +14,31 @@ console.log('=== Running Multi-Tier Evidence Framing Tests ===\n');
 
 // Test 1: Generate 3 tiers with correct epistemic badges and certainty
 {
+  const mockFinding = {
+    type: 'UNINDEXED_QUERY' as const,
+    severity: 'CRITICAL' as const,
+    symbol: 'Claim.where',
+    file: 'app/Http/Controllers/ChannelController.php',
+    line: 55,
+    querySnippet: 'Claim::where("user_id", $u)->get()',
+    fixSql: 'CREATE INDEX CONCURRENTLY ON claims (user_id);',
+    reproExplain: 'autocannon -c 26 -d 10 http://localhost:3000/creator/channels',
+    scanType: 'Seq Scan',
+    cost: 450,
+    rawWhy: 'Unindexed foreign key lookup on PostgreSQL',
+    route: '/creator/channels',
+    table: 'claims',
+    column: 'user_id',
+    dialect: 'postgresql' as const
+  };
+
   const solved = solveCompleteQueuingNetwork({
-    codeFindings: [
-      {
-        symbol: 'Claim.where',
-        file: 'app/Http/Controllers/ChannelController.php',
-        line: 55,
-        scanType: 'Seq Scan',
-        cost: 450,
-        rawWhy: 'Unindexed foreign key lookup on PostgreSQL',
-        route: '/creator/channels',
-        table: 'claims',
-        column: 'user_id',
-        dialect: 'postgresql'
-      }
-    ],
+    codeFindings: [mockFinding],
     repoInfo: { name: 'buildr', owner: 'mikaelendale' }
   });
 
   const evidence = buildMultiTierEvidence({
-    finding: {
-      symbol: 'Claim.where',
-      file: 'app/Http/Controllers/ChannelController.php',
-      line: 55,
-      scanType: 'Seq Scan',
-      cost: 450,
-      rawWhy: 'Unindexed foreign key lookup on PostgreSQL',
-      route: '/creator/channels',
-      table: 'claims',
-      column: 'user_id',
-      dialect: 'postgresql'
-    },
+    finding: mockFinding,
     solvedNetwork: solved,
     symbol: 'Claim.where',
     file: 'app/Http/Controllers/ChannelController.php',

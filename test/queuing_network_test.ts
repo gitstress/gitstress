@@ -167,6 +167,38 @@ function assert(desc: string, condition: boolean, extraInfo?: string) {
   );
 }
 
+// 5. GitStress Engine derivation: Next.js 15 App Router + In-memory AST/MVA solver
+{
+  const result = solveCompleteQueuingNetwork({
+    composeData: { dbPoolSize: 100, workerCount: 16 },
+    codeFindings: [{
+      type: 'UNBOUNDED_SELECT',
+      severity: 'CRITICAL',
+      symbol: 'fetcher.fetchLiveGitHubRepo (outbound socket pool)',
+      route: '/api/diagnose',
+      file: 'com/src/core/github_fetcher.ts',
+      line: 272,
+      table: 'http/agent-pool',
+      querySnippet: 'let files = await downloadRawFiles(owner, repo, defaultBranch, candidatePaths, token);',
+      rawWhy: 'Unbounded parallel GitHub raw tree fetches exhaust outbound HTTP agent socket pool under 12,500 concurrent repo audits',
+      fixSql: '// Configure high-concurrency undici Agent pool and LRU cache:\nconst agent = new Agent({ keepAliveTimeout: 30000, maxSockets: 10000 });\nconst repoCache = new LRUCache({ max: 50000, ttl: 1000 * 60 * 30 });',
+      reproExplain: 'autocannon -c 12500 -d 10 http://localhost:4199/api/diagnose'
+    }],
+    repoInfo: { name: 'gitstress', owner: 'gitstress' }
+  });
+
+  assert(
+    'GitStress: MVA solver computes engine saturation at 12,500 concurrent',
+    result.failConcurrency === 12500,
+    `got ${result.failConcurrency}`
+  );
+  assert(
+    'GitStress: Tuned LRU cache and agent pool delivers 10x headroom to 125k concurrent',
+    result.improvedFailConcurrency === 125000,
+    `got ${result.improvedFailConcurrency} (${result.improvedHeadroom})`
+  );
+}
+
 console.log(`\nOperational Queuing Network Validation: \x1b[1;32m${passed}/${total} Passed\x1b[0m\n`);
 if (passed === total) {
   process.exit(0);

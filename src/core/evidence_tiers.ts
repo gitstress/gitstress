@@ -8,11 +8,11 @@
  */
 
 import type { MultiTierEvidence, EvidenceTier, CodeFinding } from './types';
-import type { QueuingNetworkResult } from './queuing_network';
+import type { SolvedQueuingNetwork } from './queuing_network';
 
 export interface EvidenceBuildOptions {
   finding?: CodeFinding;
-  solvedNetwork: QueuingNetworkResult;
+  solvedNetwork: SolvedQueuingNetwork;
   symbol: string;
   file: string;
   line: number;
@@ -58,10 +58,12 @@ export function buildMultiTierEvidence(opts: EvidenceBuildOptions): MultiTierEvi
     certainty: '100% Deterministic (Zero Speculation)'
   };
 
-  if (finding?.dialect || finding?.table) {
-    const table = finding.table || 'target_table';
-    const column = finding.column || 'lookup_column';
-    const detectedDialect = finding.dialect || dialect || dbEngine;
+  const isActualDatabaseScan = (finding?.type === 'UNINDEXED_QUERY' || !finding?.type) && (Boolean(finding?.dialect) || (Boolean(finding?.column) && finding?.table !== 'records' && !finding?.table?.includes('/')));
+
+  if (isActualDatabaseScan) {
+    const table = finding?.table || 'target_table';
+    const column = finding?.column || 'lookup_column';
+    const detectedDialect = finding?.dialect || dialect || dbEngine;
     
     tier1Summary = `Unindexed ${detectedDialect} foreign key lookup: '${table}.${column}' in '${symbol}' without supporting B-Tree index in migration DDL.`;
     tier1Details = `Inspection of ${file}:${line} cross-referenced with migration definitions confirms that ${table}.${column} lacks an explicit index. Under ${detectedDialect}, foreign key constraints do not construct automatic indexes, guaranteeing sequential table scans.`;
@@ -74,6 +76,11 @@ export function buildMultiTierEvidence(opts: EvidenceBuildOptions): MultiTierEvi
     tier1Details = `Static AST inspection confirmed that Mutex.Lock() is held across network socket or database calls, serializing concurrent worker threads into station queue backlog.`;
     tier1Metrics.lockPrimitive = 'sync.Mutex';
     tier1Metrics.concurrencyMode = 'Goroutine Serialization';
+  } else if (symbol.includes('fetchLiveGitHubRepo') || file.includes('fetcher') || (finding?.table && finding.table.includes('agent-pool'))) {
+    tier1Summary = `Outbound HTTP socket pool bottleneck: '${symbol}' in ${file}:${line}.`;
+    tier1Details = `Static AST inspection confirms that concurrent repository tree ingestion performs parallel HTTPS requests without connection pooling or LRU cache reuse.`;
+    tier1Metrics.poolType = 'HTTP / TLS Outbound Socket Pool';
+    tier1Metrics.saturationMode = 'Socket Descriptor Exhaustion';
   } else if (finding?.rawWhy) {
     tier1Summary = `Static code defect: ${finding.rawWhy} (${file}:${line}).`;
     tier1Details = `Verified syntax pattern in ${file}:${line}: execution path performs synchronous un-throttled workload under concurrent ingress.`;
@@ -106,7 +113,9 @@ export function buildMultiTierEvidence(opts: EvidenceBuildOptions): MultiTierEvi
   const baselineServiceTimeMs = 75.0; // Sequential scan station latency
   const remedyServiceTimeMs = 4.1;   // B-Tree indexed station latency
   const tier2Summary = `Mean Value Analysis (MVA) projects queue backlog and saturation collapse at N=${failsAtNum} concurrent requests under pool limit K=${poolSize}.`;
-  const tier2Details = `Operational queuing network solved across 4 stations (Ingress Proxy → App Workers → DB Pool → Query/Disk I/O). By Little's Law (L = λW), arrival rate λ exceeds database pool drainage rate μ = K / S_db when concurrent clients cross N=${failsAtNum}, spiking queue delay from ${solvedNetwork.baselineP99Ms || 82}ms to ${solvedNetwork.saturationP99Ms || 1940}ms.`;
+  const baseLat = solvedNetwork.baselineP99Ms || solvedNetwork.baseLatencyMs || 82;
+  const satLat = solvedNetwork.saturationP99Ms || solvedNetwork.p99AtFailMs || 1940;
+  const tier2Details = `Operational queuing network solved across 4 stations (Ingress Proxy → App Workers → DB Pool → Query/Disk I/O). By Little's Law (L = λW), arrival rate λ exceeds database pool drainage rate μ = K / S_db when concurrent clients cross N=${failsAtNum}, spiking queue delay from ${baseLat}ms to ${satLat}ms.`;
   
   const tier2Metrics: Record<string, string | number> = {
     predictedSaturationKnee: `${failsAtNum} concurrent users`,

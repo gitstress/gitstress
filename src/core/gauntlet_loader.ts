@@ -85,6 +85,29 @@ export const GAUNTLET_PRESETS: Record<string, {
     ]
   },
 
+  'gitstress/gitstress': {
+    name: 'gitstress',
+    owner: 'gitstress',
+    files: [
+      {
+        path: 'package.json',
+        content: `{\n  "name": "gitstress",\n  "version": "0.11.0",\n  "dependencies": {\n    "next": "15.5.28",\n    "react": "^19.3.0"\n  }\n}`
+      },
+      {
+        path: 'docker-compose.yml',
+        content: `version: '3.8'\nservices:\n  gitstress-web:\n    image: gitstress/web:latest\n    ports:\n      - "4199:4199"\n    environment:\n      NODE_ENV: production\n      WEB_CONCURRENCY: 16\n      MAX_CONCURRENT_DIAGNOSTICS: 12500`
+      },
+      {
+        path: 'com/app/api/diagnose/route.ts',
+        content: `import { NextRequest, NextResponse } from 'next/server';\nimport { getDiagnosticForRepo } from '@/src/core/gauntlet_loader';\n\n// High-throughput concurrency diagnostic API\nexport async function POST(req: NextRequest) {\n  const { owner, repo } = await req.json();\n  const report = await getDiagnosticForRepo(owner, repo);\n  return NextResponse.json(report);\n}`
+      },
+      {
+        path: 'com/src/core/github_fetcher.ts',
+        content: `// GitStress Upstream Ingestion & In-Memory Analytical Engine\nexport async function fetchLiveGitHubRepo(owner: string, repo: string) {\n  // In-memory LRU cache protects upstream GitHub API during traffic surges\n  // Outbound socket pool reaches connection ceiling under 12,500 concurrent repo analyses\n  return await downloadRawFiles(owner, repo, 'main', candidatePaths);\n}`
+      }
+    ]
+  },
+
   'msh-protocol/msh': {
     name: 'msh',
     owner: 'msh-protocol',

@@ -27,5 +27,5 @@ jobs:
       - name: Run Gauntlet concurrency validation tests
         run: npm test
 
-      - name: Build Next.js application
+      - name: Build CLI distribution package
         run: npm run build

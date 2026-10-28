@@ -5,7 +5,7 @@
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "https://github.com/gitstress/gitstress.git"
+    "url": "git+https://github.com/gitstress/gitstress.git"
   },
   "homepage": "https://github.com/gitstress/gitstress#readme",
   "bugs": {
@@ -13,7 +13,7 @@
   },
   "main": "src/core/analyzer.ts",
   "bin": {
-    "gitstress": "./dist/gitstress.js"
+    "gitstress": "dist/gitstress.js"
   },
   "files": [
     "dist",

@@ -24,11 +24,10 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: 'npm'
 
       - name: Install Dependencies & Build
         run: |
-          npm ci || npm install
+          npm install
           npm run build
 
       - name: Run Test Suite

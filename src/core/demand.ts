@@ -11,6 +11,7 @@ import type { DockerfileParsedData } from './parsers/dockerfile';
 import type { SchemaParsedData } from './parsers/schema';
 import type { CodeFinding } from './parsers/code';
 import { solveCompleteQueuingNetwork, type SolvedQueuingNetwork } from './queuing_network';
+import { rankFindingsByExposureAndSeverity } from './route_exposure';
 
 export interface DemandInput {
   composeData?: Partial<ComposeParsedData>;
@@ -43,11 +44,9 @@ export function runDemandPropagation({
   const maxConnections = composeData.maxConnections || 100;
   const workers = composeData.workerCount || dockerData.workers || 2;
 
-  // Find most severe query finding
-  let primaryFinding = codeFindings.find(f => f.type === 'UNINDEXED_QUERY');
-  if (!primaryFinding && codeFindings.length > 0) {
-    primaryFinding = codeFindings[0];
-  }
+  // Rank findings by exposure weight (PUBLIC 100 > AUTH 10 > INTERNAL 1) and defect severity
+  const rankedFindings = rankFindingsByExposureAndSeverity(codeFindings);
+  const primaryFinding = rankedFindings[0];
 
   // Cost calculation for the query
   const queryCost = estimateQueryCost({

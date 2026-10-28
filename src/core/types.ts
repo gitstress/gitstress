@@ -50,6 +50,53 @@ export interface LegalPatch {
   modelMutation: string;
 }
 
+export interface EvidenceTier {
+  tier: 1 | 2 | 3;
+  name: string;
+  badge: string;
+  veracity: 'deterministic-ast-schema' | 'mathematical-queuing-model' | 'empirical-hardware-test';
+  confidenceScore: number;
+  summary: string;
+  details: string;
+  metrics?: Record<string, string | number>;
+  command?: string;
+  remedyProof?: string;
+}
+
+export interface MultiTierEvidence {
+  tier1: EvidenceTier;
+  tier2: EvidenceTier;
+  tier3: EvidenceTier;
+  synthesis: string;
+}
+
+export interface SmartIndexRecommendation {
+  type: 'composite' | 'partial' | 'single';
+  table: string;
+  fields: Array<{ name: string; sort?: 'asc' | 'desc'; op?: 'eq' | 'range' | 'sort' }>;
+  partialCondition?: string;
+  reason: string;
+  sql: string;
+  ormFix?: {
+    prisma?: string;
+    laravel?: string;
+    django?: string;
+    rails?: string;
+  };
+  ramFootprintReduction?: string;
+  esrOrderExplanation?: string;
+}
+
+export type RouteExposureTier = 'PUBLIC' | 'AUTHENTICATED' | 'INTERNAL_ADMIN';
+
+export interface RouteExposureInfo {
+  tier: RouteExposureTier;
+  weight: number; // 100 for PUBLIC, 10 for AUTHENTICATED, 1 for INTERNAL_ADMIN
+  label: string;
+  reason: string;
+  blastRadiusScore?: number;
+}
+
 export interface CulpritInfo {
   symbol: string;
   failsAt: string;
@@ -69,6 +116,9 @@ export interface CulpritInfo {
   isRefusal?: boolean;
   failureMode?: string;
   legalPatch?: LegalPatch;
+  evidenceTiers?: MultiTierEvidence;
+  smartIndex?: SmartIndexRecommendation;
+  exposure?: RouteExposureInfo;
 }
 
 export interface InfraNode {

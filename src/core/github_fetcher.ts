@@ -132,7 +132,7 @@ export async function fetchLiveGitHubRepo(
     let repoRes = await fetch(`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`, {
       headers,
       cache: 'no-store',
-      signal: AbortSignal.timeout(3000)
+      signal: AbortSignal.timeout(10000)
     });
 
     // Fallback: If Bearer returned 404/401 and token is present, try with classic "token" scheme
@@ -280,6 +280,61 @@ export async function fetchLiveGitHubRepo(
         meta.description = meta.description || fallbackData.meta.description;
         meta.language = meta.language || fallbackData.meta.language;
         meta.defaultBranch = fallbackData.meta.defaultBranch || defaultBranch;
+      }
+    }
+
+    // 5. Dynamic Route Link Walker: If route definitions reference sub-routes or controllers, resolve them dynamically
+    const dynamicProbePaths: string[] = [];
+    for (const f of files) {
+      if (/routes?\/[a-zA-Z0-9_\-]+\.php$/i.test(f.path)) {
+        // A. Sub-routes required like require __DIR__.'/creator.php' or require 'auth.php'
+        const reqMatches = [...f.content.matchAll(/require(?:_once)?\s+(?:__DIR__\s*\.\s*['"]\/|['"])([a-zA-Z0-9_\-]+(?:\.php)?)/g)];
+        for (const rm of reqMatches) {
+          const subFile = rm[1].endsWith('.php') ? `routes/${rm[1]}` : `routes/${rm[1]}.php`;
+          if (!files.some(e => e.path === subFile) && !dynamicProbePaths.includes(subFile)) {
+            dynamicProbePaths.push(subFile);
+          }
+        }
+        // B. Controllers imported like use App\Http\Controllers\Auth\CreatorLoginController;
+        const ctrlMatches = [...f.content.matchAll(/use\s+(App\\Http\\Controllers\\[a-zA-Z0-9_\\]+);/g)];
+        for (const cm of ctrlMatches) {
+          const ctrlPath = cm[1].replace(/\\/g, '/').replace(/^App\//, 'app/') + '.php';
+          if (!files.some(e => e.path === ctrlPath) && !dynamicProbePaths.includes(ctrlPath)) {
+            dynamicProbePaths.push(ctrlPath);
+          }
+        }
+      } else if (/config\/routes\.rb$/i.test(f.path)) {
+        // Rails controller references: to: 'sessions#create'
+        const rbMatches = [...f.content.matchAll(/to:\s*['"]([a-zA-Z0-9_]+)#/g)];
+        for (const rm of rbMatches) {
+          const ctrlPath = `app/controllers/${rm[1]}_controller.rb`;
+          if (!files.some(e => e.path === ctrlPath) && !dynamicProbePaths.includes(ctrlPath)) {
+            dynamicProbePaths.push(ctrlPath);
+          }
+        }
+      }
+    }
+
+    if (dynamicProbePaths.length > 0) {
+      const linkedFiles = await downloadRawFiles(owner, repo, defaultBranch, dynamicProbePaths.slice(0, 6), token);
+      files.push(...linkedFiles);
+
+      // If any sub-routes were fetched (e.g. routes/creator.php), extract their controllers as well
+      const secondaryControllers: string[] = [];
+      for (const lf of linkedFiles) {
+        if (/routes?\/[a-zA-Z0-9_\-]+\.php$/i.test(lf.path)) {
+          const subCtrlMatches = [...lf.content.matchAll(/use\s+(App\\Http\\Controllers\\[a-zA-Z0-9_\\]+);/g)];
+          for (const cm of subCtrlMatches) {
+            const ctrlPath = cm[1].replace(/\\/g, '/').replace(/^App\//, 'app/') + '.php';
+            if (!files.some(e => e.path === ctrlPath) && !secondaryControllers.includes(ctrlPath)) {
+              secondaryControllers.push(ctrlPath);
+            }
+          }
+        }
+      }
+      if (secondaryControllers.length > 0) {
+        const ctrlFiles = await downloadRawFiles(owner, repo, defaultBranch, secondaryControllers.slice(0, 4), token);
+        files.push(...ctrlFiles);
       }
     }
 
@@ -486,6 +541,44 @@ function getStandardProbePaths(): string[] {
     'compose.yaml',
     'compose.yml',
     'deploy/docker-compose.yml',
+    // Laravel / PHP (Framework Standards)
+    'composer.json',
+    'routes/web.php',
+    'routes/api.php',
+    'config/database.php',
+    'artisan',
+    'app/Http/Controllers/Controller.php',
+    'app/Http/Controllers/UserController.php',
+    'app/Models/User.php',
+    'database/migrations/0001_01_01_000000_create_users_table.php',
+    'database/migrations/2014_10_12_000000_create_users_table.php',
+    // Ruby on Rails
+    'Gemfile',
+    'config/routes.rb',
+    'config/database.yml',
+    'db/schema.rb',
+    'config.ru',
+    'app/controllers/application_controller.rb',
+    'app/controllers/sessions_controller.rb',
+    'app/controllers/users_controller.rb',
+    'app/models/user.rb',
+    // Python / Django / FastAPI
+    'manage.py',
+    'app/views.py',
+    'users/views.py',
+    'users/models.py',
+    // Perl / PSGI
+    'cpanfile',
+    'Makefile.PL',
+    'app.psgi',
+    'app.pl',
+    // Java / Spring
+    'pom.xml',
+    'build.gradle',
+    'build.gradle.kts',
+    // C# / .NET
+    'Program.cs',
+    'Startup.cs',
     'package.json',
     'pnpm-workspace.yaml',
     'packages/medusa/package.json',

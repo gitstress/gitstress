@@ -1,7 +1,7 @@
 import { parseDockerCompose } from './parsers/compose';
 import { parseDockerfile } from './parsers/dockerfile';
 import { parseDatabaseSchema } from './parsers/schema';
-import { parseSourceCode, type CodeFinding } from './parsers/code';
+import { parseSourceCode, buildSmartIndexForFinding, type CodeFinding } from './parsers/code';
 import { runDemandPropagation } from './demand';
 import { buildCulpritReport } from './culprit';
 import type { GitStressReport, ScannedFileInfo, WorkloadClass } from './types';
@@ -504,6 +504,9 @@ export function analyzeVirtualFiles(
   if (codeFindings.length === 0) {
     if (schemaData.unindexedFields.length > 0) {
       const uf = schemaData.unindexedFields[0];
+      const dialect = schemaData.dialectInfo?.dialect || 'generic';
+      const targetDialect = dialect === 'mysql' || dialect === 'sqlite' ? dialect : 'postgresql';
+      const smartIndex = buildSmartIndexForFinding(uf.model, uf.field, '', targetDialect);
       codeFindings.push({
         type: 'UNINDEXED_QUERY',
         severity: 'CRITICAL',
@@ -512,10 +515,15 @@ export function analyzeVirtualFiles(
         file: uf.file,
         line: 24,
         table: uf.model.toLowerCase(),
+        column: uf.field,
         querySnippet: `SELECT * FROM ${uf.model.toLowerCase()} WHERE ${uf.field} = ?`,
-        rawWhy: `SELECT * FROM ${uf.model.toLowerCase()} WHERE ${uf.field}=? seq scan`,
-        fixSql: `CREATE INDEX CONCURRENTLY ON ${uf.model.toLowerCase()} (${uf.field});`,
-        reproExplain: `EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM ${uf.model.toLowerCase()} WHERE ${uf.field} = $1;`
+        rawWhy: smartIndex.esrOrderExplanation
+          ? `${smartIndex.esrOrderExplanation} SELECT * FROM ${uf.model.toLowerCase()} WHERE ${uf.field}=? seq scan`
+          : `SELECT * FROM ${uf.model.toLowerCase()} WHERE ${uf.field}=? seq scan`,
+        fixSql: smartIndex.sql,
+        reproExplain: `EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM ${uf.model.toLowerCase()} WHERE ${uf.field} = $1;`,
+        dialect,
+        smartIndex
       });
       graphSource = 'compose';
     } else {

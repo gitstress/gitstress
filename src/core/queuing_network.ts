@@ -13,6 +13,7 @@ import type { ComposeParsedData } from './parsers/compose';
 import type { DockerfileParsedData } from './parsers/dockerfile';
 import type { SchemaParsedData } from './parsers/schema';
 import type { StatusLevel, SweepRow } from './types';
+import { rankFindingsByExposureAndSeverity } from './route_exposure';
 
 export interface QueuingStation {
   id: 'ingress' | 'worker' | 'pool' | 'storage';
@@ -96,8 +97,8 @@ export function extractQueuingParameters({
   const repoOwner = (repoInfo.owner || '').toLowerCase();
 
   // Baseline capacities
-  const rawWorkers = composeData.workerCount || dockerData.workers || 2;
-  const rawPool = composeData.dbPoolSize || 10;
+  const rawWorkers = composeData.workerCount || dockerData.workers || 0;
+  const rawPool = composeData.dbPoolSize || 0;
 
   // Station 0: Ingress Reverse Proxy / Epoll Gateway
   let cIngress = 10000;
@@ -106,19 +107,19 @@ export function extractQueuingParameters({
   let betaIngress = 0.000001;
 
   // Station 1: Application Worker / Event Loop
-  let cWorker = rawWorkers;
+  let cWorker = rawWorkers || 2;
   let dWorker = 12.0;
   let alphaWorker = 0.001;
   let betaWorker = 0.00001;
 
   // Station 2: Downstream Connection Pool / Network Transport
-  let cPool = rawPool;
+  let cPool = rawPool || 10;
   let dPool = 1.8;
   let alphaPool = 0.002;
   let betaPool = 0.00005;
 
   // Station 3: Storage Engine / DB Disk IO / Mutex Lock
-  let cStorage = Math.min(rawPool, 16);
+  let cStorage = Math.min(cPool, 16);
   let dStorage = 25.0;
   let alphaStorage = 0.005;
   let betaStorage = 0.0001;
@@ -126,16 +127,101 @@ export function extractQueuingParameters({
   let isMeshWorkload = false;
   let isProxyWorkload = false;
 
-  // Find primary culprit finding
-  const primary = codeFindings.find(f => f.type === 'UNINDEXED_QUERY') ||
-                  codeFindings.find(f => f.type === 'N_PLUS_ONE_LOOP') ||
-                  codeFindings[0];
+  // Find primary culprit finding ranked by route exposure and defect severity
+  const ranked = rankFindingsByExposureAndSeverity(codeFindings);
+  const primary = ranked[0];
 
   const whyText = (primary?.rawWhy || '').toLowerCase();
   const symbolText = (primary?.symbol || '').toLowerCase();
   const fileText = (primary?.file || '').toLowerCase();
 
-  // Dynamic Parameter Assignment based on AST patterns:
+  // Detect runtime ecosystem from AST findings, filenames, and repository context
+  const allFiles = codeFindings.map(f => (f.file || '').toLowerCase());
+  const contextStr = `${repoName} ${repoOwner} ${fileText} ${symbolText} ${whyText} ${allFiles.join(' ')}`;
+
+  const isPhp = allFiles.some(f => f.endsWith('.php')) || /\b(laravel|eloquent|artisan|php-fpm|symfony)\b/i.test(contextStr);
+  const isRuby = allFiles.some(f => f.endsWith('.rb')) || /\b(rails|puma|activerecord|sinatra)\b/i.test(contextStr);
+  const isPython = allFiles.some(f => f.endsWith('.py')) || /\b(django|fastapi|flask|gunicorn|uvicorn)\b/i.test(contextStr);
+  const isGo = allFiles.some(f => f.endsWith('.go')) || /\b(golang|goroutine|chi)\b/i.test(contextStr) || /\bgin\b/i.test(contextStr);
+  const isRust = allFiles.some(f => f.endsWith('.rs')) || /\b(axum|tokio|actix)\b/i.test(contextStr);
+  const isJava = allFiles.some(f => f.endsWith('.java') || f.endsWith('.kt')) || /\b(spring|hibernate|jpa)\b/i.test(contextStr);
+  const isCSharp = allFiles.some(f => f.endsWith('.cs')) || /\b(aspnet|entityframework)\b/i.test(contextStr);
+  const isPerl = allFiles.some(f => f.endsWith('.pl') || f.endsWith('.pm')) || /\b(mojolicious|psgi|starman)\b/i.test(contextStr);
+
+  let detectedRuntime = 'node-web';
+
+  // 1. Establish Framework / Runtime Execution Baseline
+  if (isRust) {
+    detectedRuntime = 'rust-tokio';
+    cWorker = rawWorkers || 32;
+    dWorker = 0.4;
+    cPool = rawPool || 50;
+    alphaWorker = 0.00005;
+    betaWorker = 0.000002;
+  } else if (isGo) {
+    detectedRuntime = 'go-http';
+    cWorker = rawWorkers || 64;
+    dWorker = 1.2;
+    cPool = rawPool || 25;
+    alphaWorker = 0.0002;
+    betaWorker = 0.000008;
+  } else if (isJava) {
+    detectedRuntime = 'java-spring';
+    cWorker = rawWorkers || 150;
+    dWorker = 5.0;
+    cPool = rawPool || 10; // HikariCP maximumPoolSize default
+    alphaWorker = 0.001;
+    betaWorker = 0.00001;
+  } else if (isCSharp) {
+    detectedRuntime = 'dotnet-aspnet';
+    cWorker = rawWorkers || 64;
+    dWorker = 2.0;
+    cPool = rawPool || 100;
+    alphaWorker = 0.0005;
+    betaWorker = 0.000005;
+  } else if (isPhp) {
+    detectedRuntime = 'php-laravel';
+    // PHP-FPM process pool default (pm.max_children typically 8-16)
+    cWorker = rawWorkers || 10;
+    // In PHP-FPM each child process maintains 1 PDO connection
+    cPool = rawPool || cWorker;
+    dWorker = 22.0; // Framework autoload + Eloquent bootstrap overhead
+    alphaWorker = 0.002;
+    betaWorker = 0.00002;
+  } else if (isRuby) {
+    detectedRuntime = 'ruby-rails';
+    // Puma multi-thread model: 2 workers x 5 threads = 10 threads
+    cWorker = rawWorkers ? rawWorkers * 5 : 10;
+    cPool = rawPool || 10;
+    dWorker = 18.0; // ActiveSupport + Rack middleware
+    alphaWorker = 0.0025;
+    betaWorker = 0.00002;
+  } else if (isPython) {
+    detectedRuntime = 'python-web';
+    // Gunicorn worker pool: 4 workers
+    cWorker = rawWorkers || 4;
+    cPool = rawPool || 8;
+    dWorker = 16.0; // Django middleware + ORM
+    alphaWorker = 0.003;
+    betaWorker = 0.00003;
+  } else if (isPerl) {
+    detectedRuntime = 'perl-psgi';
+    cWorker = rawWorkers || 5;
+    cPool = rawPool || 5;
+    dWorker = 14.0;
+    alphaWorker = 0.003;
+    betaWorker = 0.00003;
+  } else {
+    // Node.js (Next.js / Express / Fastify)
+    detectedRuntime = 'node-web';
+    cWorker = rawWorkers || 1; // Single-threaded event loop
+    cPool = rawPool || 10;
+    dWorker = 8.0;
+    alphaWorker = 0.05;
+    betaWorker = 0.00001;
+  }
+
+  // 2. Specific Workload Profiles & AST Query Demands
   
   // A. Go http.DefaultTransport / HTTP reverse proxy (e.g. tkngate)
   if (whyText.includes('defaulttransport') || symbolText.includes('defaulttransport') || (fileText.includes('proxy') && fileText.endsWith('.go'))) {
@@ -146,31 +232,30 @@ export function extractQueuingParameters({
     betaPool = 0.00028;
     alphaPool = 0.012;
   }
-  // B. Unindexed Table Scan (e.g. Cal.com attendeeId, users.findByEmail)
-  else if (primary?.type === 'UNINDEXED_QUERY' || whyText.includes('seq scan') || whyText.includes('unindexed') || whyText.includes('attendeeid') || fileText.includes('syncupcoming')) {
-    const isHeavyAttendee = whyText.includes('attendeeid') || fileText.includes('syncupcoming');
-    dStorage = isHeavyAttendee ? 140.0 : 75.0; // Sequential scan across 50,000+ rows
-    alphaStorage = 0.045;
-    betaStorage = 0.00008;
-    cStorage = rawPool;
-  }
-  // C. Synchronous Database Write / Ingestion Burst (e.g. PostHog capture.py)
-  else if (fileText.includes('capture') || whyText.includes('synchronous database write') || whyText.includes('batchinsert')) {
-    cWorker = Math.max(8, rawWorkers);
-    cPool = Math.max(20, rawPool);
-    dStorage = 22.0;
-    alphaStorage = 0.0028;
-    betaStorage = 0.0000004;
-  }
-  // D. Swarm Telemetry & Mesh Socket Fanout (e.g. msh-protocol)
+  // B. Swarm Telemetry & Mesh Socket Fanout (e.g. msh-protocol)
   else if (whyText.includes('broadcast') || whyText.includes('swarmmesh') || repoOwner === 'msh-protocol') {
     isMeshWorkload = true;
-    cWorker = Math.max(4, rawWorkers);
+    cWorker = Math.max(4, cWorker);
     cPool = 1000;
     dWorker = 0.8;
     dStorage = 1.2;
     alphaWorker = 0.0004; // Sequential peer write loop contention
     betaWorker = 0.000000155; // Epoll socket wake-up churn
+  }
+  // C. Synchronous Database Write / Ingestion Burst (e.g. PostHog capture.py)
+  else if (fileText.includes('capture') || whyText.includes('synchronous database write') || whyText.includes('batchinsert')) {
+    cWorker = Math.max(8, cWorker);
+    cPool = Math.max(20, cPool);
+    dStorage = 22.0;
+    alphaStorage = 0.0028;
+    betaStorage = 0.0000004;
+  }
+  // D. Supabase unbatched RPC write
+  else if (whyText.includes('increment_views') || fileText.includes('increment-views')) {
+    cPool = 10;
+    dStorage = 42.0;
+    alphaStorage = 0.065;
+    betaStorage = 0.0005;
   }
   // E. Single-Threaded Node Event Loop / JSON.parse blocking
   else if (whyText.includes('json.parse') || fileText.includes('express') || repoOwner === 'expressjs') {
@@ -178,30 +263,49 @@ export function extractQueuingParameters({
     dWorker = 35.0;
     alphaWorker = 0.08;
   }
-  // F. Supabase unbatched RPC write
-  else if (whyText.includes('increment_views') || fileText.includes('increment-views')) {
-    cPool = 10;
-    dStorage = 42.0;
-    alphaStorage = 0.065;
-    betaStorage = 0.0005;
+  // F. N+1 Query Iteration Loop
+  else if (primary?.type === 'N_PLUS_ONE_LOOP' || whyText.includes('n+1') || whyText.includes('loop')) {
+    dStorage = 180.0; // Connection pool held during sequential round-trip iterations
+    alphaStorage = 0.075;
+    betaStorage = 0.0002;
+    cStorage = Math.min(cPool, 8);
   }
-  // G. Tokio / Axum Work-Stealing Epoll Runtime
-  else if (fileText.includes('axum') || whyText.includes('axum') || repoOwner === 'tokio-rs') {
-    cWorker = 32;
-    dWorker = 0.4;
-    cPool = 100;
-    dStorage = 2.5;
-    alphaWorker = 0.00005;
-    betaWorker = 0.000002;
+  // G. CPU Cryptographic Hashing (Bcrypt / Argon2 / Hash::check)
+  else if (primary?.type === 'CPU_CRYPTOGRAPHIC_BOTTLENECK' || whyText.includes('bcrypt') || whyText.includes('password verification')) {
+    dWorker = 85.0; // 85ms CPU time per Hash::check
+    alphaWorker = 0.08; // Severe worker CPU contention
+    betaWorker = 0.0005;
+    dStorage = 4.0; // Fast indexed DB lookup
   }
-  // H. Gin HTTP sync.Pool Context Reuse
-  else if (fileText.includes('gin') || whyText.includes('gin') || repoOwner === 'gin-gonic') {
-    cWorker = 16;
-    dWorker = 1.2;
-    cPool = 50;
-    dStorage = 5.0;
-    alphaWorker = 0.0002;
-    betaWorker = 0.000008;
+  // H. Unindexed Query / Table Scan (Differentiated by AST Target)
+  else if (primary?.type === 'UNINDEXED_QUERY' || whyText.includes('seq scan') || whyText.includes('unindexed')) {
+    const isHeavyAttendee = whyText.includes('attendeeid') || fileText.includes('syncupcoming');
+    const isPointLookup = symbolText.includes('email') || symbolText.includes('username') || symbolText.includes('uuid') || symbolText.includes('slug') || symbolText.includes('token') || symbolText.includes('id');
+    const isAggregation = symbolText.includes('count') || symbolText.includes('sum') || symbolText.includes('avg');
+
+    if (isHeavyAttendee) {
+      // 50,000+ relational bookings cross-table scan (e.g. Cal.com)
+      dStorage = 140.0;
+      alphaStorage = 0.045;
+      betaStorage = 0.00008;
+    } else if (isAggregation) {
+      // Aggregation without index
+      dStorage = 110.0;
+      alphaStorage = 0.035;
+      betaStorage = 0.00005;
+    } else if (isPointLookup) {
+      // Point equality lookup on unique candidate field (e.g. User.where(email), users.findByEmail)
+      // Scans user table until match is found (averages 1/2 table scan)
+      dStorage = isPhp ? 32.0 : (isRuby ? 30.0 : (isPython ? 28.0 : 35.0));
+      alphaStorage = 0.015;
+      betaStorage = 0.00002;
+    } else {
+      // General filter / range scan on transaction table
+      dStorage = 75.0;
+      alphaStorage = 0.045;
+      betaStorage = 0.00008;
+    }
+    cStorage = cPool;
   }
 
   const stations: [QueuingStation, QueuingStation, QueuingStation, QueuingStation] = [
@@ -217,7 +321,7 @@ export function extractQueuingParameters({
     slaLatencyMs: 250,
     thinkTimeMs: 0,
     workloadClass: 'web',
-    runtime: 'node-http',
+    runtime: detectedRuntime,
     isMeshWorkload,
     isProxyWorkload
   };
@@ -462,7 +566,8 @@ export function solveCompleteQueuingNetwork({
   const headroomMult = parseFloat((tunedFailConcurrency / Math.max(1, failConcurrency)).toFixed(1));
   const headroomStr = `+${headroomMult}×`;
 
-  const primary = codeFindings[0];
+  const ranked = rankFindingsByExposureAndSeverity(codeFindings);
+  const primary = ranked[0];
   const culpritSymbol = primary?.symbol || (evalAtFail.bottleneckStation === 'pool' ? 'http.DefaultTransport' : 'main.requestHandler');
   const detectedFile = primary?.file || 'src/server.ts';
   const detectedLine = primary?.line || 1;

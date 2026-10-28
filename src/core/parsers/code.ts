@@ -4,19 +4,108 @@
  */
 
 import type { SchemaParsedData } from './schema';
+import { synthesizeSmartIndex, type SmartIndexRecommendation } from '../smart_index';
+import { classifyRouteExposure, rankFindingsByExposureAndSeverity, type RouteExposureInfo } from '../route_exposure';
 
 export interface CodeFinding {
-  type: 'UNINDEXED_QUERY' | 'N_PLUS_ONE_LOOP' | 'UNBOUNDED_SELECT';
+  type: 'UNINDEXED_QUERY' | 'N_PLUS_ONE_LOOP' | 'UNBOUNDED_SELECT' | 'CPU_CRYPTOGRAPHIC_BOTTLENECK';
   severity: 'CRITICAL' | 'HIGH' | 'MEDIUM';
   symbol: string;
   route: string;
   file: string;
   line: number;
   table: string;
+  column?: string;
   querySnippet: string;
   rawWhy: string;
   fixSql: string;
   reproExplain: string;
+  dialect?: 'postgresql' | 'mysql' | 'sqlite' | 'mongodb' | 'generic';
+  dialectNote?: string;
+  smartIndex?: SmartIndexRecommendation;
+  exposure?: RouteExposureInfo;
+}
+
+export function buildSmartIndexForFinding(
+  model: string,
+  primaryField: string,
+  contextSnippet: string,
+  dialect: 'postgresql' | 'mysql' | 'sqlite' | 'generic' = 'postgresql'
+): SmartIndexRecommendation {
+  const fields: Array<{ name: string; op: 'eq' | 'range' | 'sort'; sort?: 'asc' | 'desc' }> = [
+    { name: primaryField, op: 'eq' }
+  ];
+
+  // Look for secondary filter fields (e.g. status, type, tenant_id, org_id, account_id)
+  const secondaryFieldMatches = [
+    ...contextSnippet.matchAll(/\b(status|type|tenant_id|tenantId|org_id|orgId|account_id|accountId|is_active|active)\b/gi)
+  ];
+  for (const m of secondaryFieldMatches) {
+    const fName = m[1];
+    if (fName.toLowerCase() !== primaryField.toLowerCase() && !fields.some(f => f.name.toLowerCase() === fName.toLowerCase())) {
+      fields.push({ name: fName, op: 'eq' });
+    }
+  }
+
+  // Look for sort fields (e.g. orderBy, order_by, created_at, updated_at, id)
+  const sortMatch = contextSnippet.match(/(?:orderBy|order_by|sort)\s*[:\(]\s*['"]?([a-zA-Z0-9_]+)['"]?(?:[^\)]*['"]?(desc|asc)['"]?)?/i) ||
+                    contextSnippet.match(/\b(created_at|createdAt|updated_at|updatedAt|id)\b\s*[:=]?\s*['"]?(desc)['"]?/i);
+  if (sortMatch) {
+    const sortCol = sortMatch[1] || 'created_at';
+    const sortDir = (sortMatch[2] || 'desc').toLowerCase() === 'asc' ? 'asc' : 'desc';
+    if (!fields.some(f => f.name.toLowerCase() === sortCol.toLowerCase())) {
+      fields.push({ name: sortCol, op: 'sort', sort: sortDir });
+    }
+  } else if (/created_at|createdAt/i.test(contextSnippet)) {
+    const col = contextSnippet.includes('createdAt') ? 'createdAt' : 'created_at';
+    if (!fields.some(f => f.name.toLowerCase() === col.toLowerCase())) {
+      fields.push({ name: col, op: 'sort', sort: 'desc' });
+    }
+  }
+
+  // Look for range fields
+  const rangeMatch = contextSnippet.match(/\b(expires_at|expiresAt|published_at|start_time|startDate)\b/i);
+  if (rangeMatch && !fields.some(f => f.name.toLowerCase() === rangeMatch[1].toLowerCase())) {
+    fields.push({ name: rangeMatch[1], op: 'range' });
+  }
+
+  // Look for partial condition (e.g. status = 'pending', status = 'active', status: 'ACTIVE')
+  let partialCondition: string | undefined = undefined;
+  const statusMatch = contextSnippet.match(/status\s*[:=,]\s*['"](pending|active|unpaid|queued|open)['"]/i) ||
+                      contextSnippet.match(/where\s*\(\s*['"]status['"]\s*,\s*['"]([a-zA-Z0-9_\-]+)['"]\s*\)/i);
+  if (statusMatch) {
+    const val = statusMatch[1];
+    partialCondition = `status = '${val}'`;
+  } else if (/read_at\s*is\s*null|readAt\s*:\s*null/i.test(contextSnippet)) {
+    partialCondition = `read_at IS NULL`;
+  } else if (/deleted_at\s*is\s*null|deletedAt\s*:\s*null/i.test(contextSnippet)) {
+    partialCondition = `deleted_at IS NULL`;
+  }
+
+  const cleanTable = model.toLowerCase().endsWith('s') ? model.toLowerCase() : `${model.toLowerCase()}s`;
+
+  return synthesizeSmartIndex({
+    table: cleanTable,
+    fields,
+    partialCondition,
+    dialect,
+    modelName: model
+  });
+}
+
+function isFieldIndexed(tableOrModel: string, field: string, schemaData?: Partial<SchemaParsedData>): boolean {
+  if (!schemaData?.indexedFields) return false;
+  const t = tableOrModel.toLowerCase();
+  const plural = t.endsWith('s') ? t : `${t}s`;
+  const singular = t.endsWith('s') ? t.slice(0, -1) : t;
+
+  return (
+    schemaData.indexedFields.has(`${t}.${field}`) ||
+    schemaData.indexedFields.has(`${plural}.${field}`) ||
+    schemaData.indexedFields.has(`${singular}.${field}`) ||
+    schemaData.indexedFields.has(field) ||
+    field.toLowerCase() === 'id'
+  );
 }
 
 export function parseSourceCode(
@@ -30,16 +119,28 @@ export function parseSourceCode(
     const content = file.content || '';
 
     // Only inspect backend/server/kernel/system code files
-    if (!/\.(js|ts|py|go|rb|rs|c|cpp|cc|h|hpp)$/.test(filename)) continue;
+    if (!/\.(js|jsx|ts|tsx|py|go|rb|rs|php|pl|pm|java|kt|cs)$/.test(filename)) continue;
     if (/test|spec|\.d\.ts|node_modules|dist|build/i.test(filename)) continue;
 
-    parseEndpointsAndQueries(filename, content, findings);
+    parseEndpointsAndQueries(filename, content, findings, schemaData);
   }
 
-  return findings;
+  // Classify route exposure for each finding
+  for (const f of findings) {
+    if (!f.exposure) {
+      f.exposure = classifyRouteExposure(f.route, f.file, f.querySnippet);
+    }
+  }
+
+  return rankFindingsByExposureAndSeverity(findings);
 }
 
-function parseEndpointsAndQueries(filename: string, content: string, findings: CodeFinding[]): void {
+function parseEndpointsAndQueries(
+  filename: string,
+  content: string,
+  findings: CodeFinding[],
+  schemaData?: Partial<SchemaParsedData>
+): void {
   const lines = content.split('\n');
 
   let currentRoute: string | null = null;
@@ -57,10 +158,133 @@ function parseEndpointsAndQueries(filename: string, content: string, findings: C
     const line = lines[i].trim();
     const lineNum = i + 1;
 
+    // Detect Laravel route declarations: Route::get('/discover', ...), Route::get('/@{username}', ...)
+    const laravelRouteMatch = line.match(/Route::(?:get|post|put|delete|patch|options)\s*\(\s*['"]([^'"]+)['"]/i);
+    if (laravelRouteMatch) {
+      currentRoute = laravelRouteMatch[1];
+      currentSymbol = `Route::${laravelRouteMatch[0].split('(')[0].replace(/.*::/, '')} ${currentRoute}`;
+    }
+
+    // Detect Laravel Eloquent / DB queries: Channel::where(...), User::where(...), DB::table('...')->where(...)
+    const laravelQueryMatch = line.match(/(?:([A-Z][a-zA-Z0-9_]+)::(?:where|whereIn|whereBetween|whereNotNull|orWhere)|DB::table\s*\(\s*['"]([a-zA-Z0-9_]+)['"]\s*\)->where)\s*\(\s*['"]([a-zA-Z0-9_]+)['"]/i);
+    if (laravelQueryMatch) {
+      const model = laravelQueryMatch[1] || laravelQueryMatch[2];
+      const field = laravelQueryMatch[3];
+      const sym = `${model}.where(${field})`;
+      const alreadyIndexed = isFieldIndexed(model, field, schemaData);
+
+      if (!alreadyIndexed) {
+        const isForeignKey = /_id$/i.test(field);
+        const dialect = schemaData?.dialectInfo?.dialect || 'generic';
+        const isPostgres = dialect === 'postgresql';
+
+        const chainedSnippet = lines.slice(i, Math.min(lines.length, i + 6)).join('\n');
+        const smartIndex = buildSmartIndexForFinding(
+          model,
+          field,
+          chainedSnippet,
+          isPostgres ? 'postgresql' : (dialect === 'mysql' || dialect === 'sqlite' ? dialect : 'postgresql')
+        );
+
+        const whyMessage = isPostgres && isForeignKey
+          ? `In PostgreSQL, foreign key constraints on ${model}.${field} do NOT automatically create B-Tree indexes (unlike MySQL InnoDB). Sequential table scan causes database connection pool saturation under concurrent requests`
+          : (smartIndex.esrOrderExplanation
+              ? `${smartIndex.esrOrderExplanation} Unindexed table scan on ${model}.${field} saturates database connection pool under concurrent load`
+              : `Sequential table scan on ${model}.${field} causes database connection pool saturation under concurrent requests`);
+
+        const dialectNote = isPostgres && isForeignKey
+          ? 'PostgreSQL Engine: Foreign keys lack automatic B-Tree indexes'
+          : undefined;
+
+        findings.push({
+          type: 'UNINDEXED_QUERY',
+          severity: 'CRITICAL',
+          symbol: sym,
+          route: currentRoute || `/api/${model.toLowerCase()}`,
+          file: filename,
+          line: lineNum,
+          table: model.toLowerCase(),
+          column: field,
+          querySnippet: line.length > 80 ? line.substring(0, 80) + '...' : line,
+          rawWhy: whyMessage,
+          fixSql: smartIndex.sql,
+          reproExplain: `autocannon -c 64 -d 10 -m GET http://localhost:8000${currentRoute || '/'}`,
+          dialect: dialect,
+          dialectNote: dialectNote,
+          smartIndex
+        });
+      }
+    }
+
+    // Detect CPU Cryptographic password verification (Bcrypt / Argon2 / Hash::check)
+    const cryptoMatch = line.match(/(?:Hash::(?:check|make)|password_verify|bcrypt)\s*\(/i);
+    if (cryptoMatch) {
+      findings.push({
+        type: 'CPU_CRYPTOGRAPHIC_BOTTLENECK',
+        severity: 'HIGH',
+        symbol: cryptoMatch[0].replace(/\($/, ''),
+        route: currentRoute || '/login',
+        file: filename,
+        line: lineNum,
+        table: 'cpu/bcrypt',
+        querySnippet: line.length > 80 ? line.substring(0, 80) + '...' : line,
+        rawWhy: `Synchronous Bcrypt password verification consumes 80-100ms of worker CPU, saturating worker threads under concurrent login bursts`,
+        fixSql: `-- Mitigate login CPU starvation:\n1. Offload authentication to dedicated auth microservice or identity provider\n2. Enforce aggressive per-IP and per-account rate limits before running Hash::check\n3. Calibrate Bcrypt cost or use Argon2id with memory-optimized limits`,
+        reproExplain: `autocannon -c 30 -d 10 -m POST -H "Content-Type: application/x-www-form-urlencoded" -b "email=test@example.com&password=secret" http://localhost:8000/login`
+      });
+    }
+
+    // Detect Ruby on Rails / Sinatra routes: get '/users', to: 'users#index'
+    const rubyRouteMatch = line.match(/(?:get|post|put|delete|patch)\s+['":]([a-zA-Z0-9_\-\/:]+)['"]?(?:\s*,\s*to:\s*['"]([^'"]+)['"])?/i);
+    if (rubyRouteMatch && (filename.endsWith('.rb') || filename.includes('routes'))) {
+      currentRoute = rubyRouteMatch[1].startsWith('/') ? rubyRouteMatch[1] : `/${rubyRouteMatch[1]}`;
+      currentSymbol = rubyRouteMatch[2] ? `Rails ${rubyRouteMatch[2]}` : `Ruby ${currentRoute}`;
+    }
+
+    // Detect Ruby ActiveRecord / Sequel queries: User.where(email: ...), Account.find_by(slug: ...)
+    const rubyQueryMatch = line.match(/([A-Z][a-zA-Z0-9_]+)\.(?:where|find_by|find_by_!|joins)\s*\(\s*[:'"]([a-zA-Z0-9_]+)/i);
+    if (rubyQueryMatch && filename.endsWith('.rb')) {
+      const model = rubyQueryMatch[1];
+      const field = rubyQueryMatch[2];
+      const alreadyIndexed = isFieldIndexed(model, field, schemaData);
+
+      if (!alreadyIndexed) {
+        const dialect = schemaData?.dialectInfo?.dialect || 'generic';
+        const targetDialect = dialect === 'mysql' || dialect === 'sqlite' ? dialect : 'postgresql';
+        const chainedSnippet = lines.slice(i, Math.min(lines.length, i + 6)).join('\n');
+        const smartIndex = buildSmartIndexForFinding(model, field, chainedSnippet, targetDialect);
+
+        findings.push({
+          type: 'UNINDEXED_QUERY',
+          severity: 'CRITICAL',
+          symbol: `${model}.${field}_lookup`,
+          route: currentRoute || `/${model.toLowerCase()}s`,
+          file: filename,
+          line: lineNum,
+          table: model.toLowerCase() + 's',
+          column: field,
+          querySnippet: line.length > 80 ? line.substring(0, 80) + '...' : line,
+          rawWhy: smartIndex.esrOrderExplanation
+            ? `${smartIndex.esrOrderExplanation} Sequential scan on ${model}.${field} causes ActiveRecord connection pool starvation under load`
+            : `Sequential scan on ${model}.${field} causes ActiveRecord connection pool starvation under load`,
+          fixSql: smartIndex.sql,
+          reproExplain: `autocannon -c 64 -d 10 http://localhost:3000${currentRoute || '/'}`,
+          dialect: dialect,
+          smartIndex
+        });
+      }
+    }
+
     // Detect route declarations (Express / FastAPI / Flask / Next.js)
-    const routeMatch = line.match(/(?:@app\.(?:get|post|put|delete)|app\.(?:get|post|put|delete)|router\.(?:get|post|put|delete))\s*\(\s*['"]([^'"]+)['"]/i);
+    const routeMatch = line.match(/(?:@app\.(?:get|post|put|delete|patch)|app\.(?:get|post|put|delete|patch)|router\.(?:get|post|put|delete|patch))\s*\(\s*['"]([^'"]+)['"]/i);
     if (routeMatch) {
       currentRoute = routeMatch[1];
+    } else if (/@(?:app|router)\.(?:get|post|put|delete|patch)\s*\(/i.test(line)) {
+      const nextFewLines = lines.slice(i, Math.min(lines.length, i + 5)).join(' ');
+      const mRoute = nextFewLines.match(/@(?:app|router)\.(?:get|post|put|delete|patch)\s*\(\s*['"]([^'"]+)['"]/i);
+      if (mRoute) {
+        currentRoute = mRoute[1];
+      }
     }
 
     // Detect Next.js route export handlers
@@ -358,7 +582,13 @@ function parseEndpointsAndQueries(filename: string, content: string, findings: C
       } else if (currentRoute) {
         symbol = `route(${currentRoute})`;
       }
-      
+
+      const fieldMatch = line.match(/\b(email|user_id|tenant_id|org_id)\b/i);
+      const field = fieldMatch ? fieldMatch[1] : 'email';
+      const dialect = schemaData?.dialectInfo?.dialect || 'generic';
+      const targetDialect = dialect === 'mysql' || dialect === 'sqlite' ? dialect : 'postgresql';
+      const smartIndex = buildSmartIndexForFinding(table, field, line, targetDialect);
+
       findings.push({
         type: 'UNINDEXED_QUERY',
         severity: 'CRITICAL',
@@ -367,10 +597,15 @@ function parseEndpointsAndQueries(filename: string, content: string, findings: C
         file: filename,
         line: lineNum,
         table: table.toLowerCase(),
+        column: field,
         querySnippet: line.length > 80 ? line.substring(0, 80) + '...' : line,
-        rawWhy: `SELECT * FROM ${table} WHERE email=? seq scan`,
-        fixSql: `CREATE INDEX CONCURRENTLY ON ${table} (email);`,
-        reproExplain: `EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM ${table} WHERE email = $1;`
+        rawWhy: smartIndex.esrOrderExplanation
+          ? `${smartIndex.esrOrderExplanation} SELECT * FROM ${table} WHERE ${field}=? seq scan`
+          : `SELECT * FROM ${table} WHERE ${field}=? seq scan`,
+        fixSql: smartIndex.sql,
+        reproExplain: `EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM ${table} WHERE ${field} = $1;`,
+        dialect: dialect,
+        smartIndex
       });
     }
 
@@ -419,15 +654,19 @@ function parseEndpointsAndQueries(filename: string, content: string, findings: C
   }
 
   // Multi-line block token scanner (Prisma, TypeORM, Drizzle, Django, SQLAlchemy, GORM, ActiveRecord)
-  parseMultiLineORMBlocks(filename, content, findings, currentRoute);
+  parseMultiLineORMBlocks(filename, content, findings, currentRoute, schemaData);
 }
 
 function parseMultiLineORMBlocks(
   filename: string,
   content: string,
   findings: CodeFinding[],
-  currentRoute: string | null
+  currentRoute: string | null,
+  schemaData?: Partial<SchemaParsedData>
 ): void {
+  const dialect = schemaData?.dialectInfo?.dialect || 'generic';
+  const targetDialect = dialect === 'mysql' || dialect === 'sqlite' ? dialect : 'postgresql';
+
   // Helper to compute line number from character offset
   const getLineNum = (index: number) => content.slice(0, index).split('\n').length;
   const isDuplicate = (line: number, symbol: string) => 
@@ -450,6 +689,7 @@ function parseMultiLineORMBlocks(
       const field = unindexedKeyMatch[1];
       const symbol = `${model}.${op}`;
       if (!isDuplicate(lineNum, symbol)) {
+        const smartIndex = buildSmartIndexForFinding(model, field, body, targetDialect);
         findings.push({
           type: 'UNINDEXED_QUERY',
           severity: 'CRITICAL',
@@ -458,10 +698,15 @@ function parseMultiLineORMBlocks(
           file: filename,
           line: lineNum,
           table: model.toLowerCase(),
+          column: field,
           querySnippet: pMatch[0].length > 120 ? pMatch[0].substring(0, 120) + '...' : pMatch[0],
-          rawWhy: `Prisma ${op} query on unindexed foreign key (${field}) executes full table scan under concurrent requests`,
-          fixSql: `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_${model.toLowerCase()}_${field} ON "${model}" (${field});`,
-          reproExplain: `EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM "${model}" WHERE "${field}" = $1 ORDER BY id DESC;`
+          rawWhy: smartIndex.esrOrderExplanation
+            ? `${smartIndex.esrOrderExplanation} Prisma ${op} query on unindexed foreign key (${field}) executes full table scan under concurrent requests`
+            : `Prisma ${op} query on unindexed foreign key (${field}) executes full table scan under concurrent requests`,
+          fixSql: smartIndex.sql,
+          reproExplain: `EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM "${model}" WHERE "${field}" = $1 ORDER BY id DESC;`,
+          dialect: dialect,
+          smartIndex
         });
       }
     } else if (op === 'findMany' && !hasLimit && !isDuplicate(lineNum, `${model}.findMany`)) {
@@ -492,6 +737,7 @@ function parseMultiLineORMBlocks(
 
     if (unindexedMatch && !isDuplicate(lineNum, `${table}.select`)) {
       const field = unindexedMatch[1];
+      const smartIndex = buildSmartIndexForFinding(table, field, whereClause, targetDialect);
       findings.push({
         type: 'UNINDEXED_QUERY',
         severity: 'CRITICAL',
@@ -500,10 +746,15 @@ function parseMultiLineORMBlocks(
         file: filename,
         line: lineNum,
         table: table.toLowerCase(),
+        column: field,
         querySnippet: dMatch[0].length > 120 ? dMatch[0].substring(0, 120) + '...' : dMatch[0],
-        rawWhy: `Drizzle/Kysely multi-line query filters on unindexed column (${field}) without covering composite index`,
-        fixSql: `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_${table}_${field} ON ${table} (${field});`,
-        reproExplain: `EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM ${table} WHERE ${field} = $1;`
+        rawWhy: smartIndex.esrOrderExplanation
+          ? `${smartIndex.esrOrderExplanation} Drizzle/Kysely multi-line query filters on unindexed column (${field}) without covering composite index`
+          : `Drizzle/Kysely multi-line query filters on unindexed column (${field}) without covering composite index`,
+        fixSql: smartIndex.sql,
+        reproExplain: `EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM ${table} WHERE ${field} = $1;`,
+        dialect: dialect,
+        smartIndex
       });
     }
   }
@@ -538,6 +789,7 @@ function parseMultiLineORMBlocks(
       });
     } else if (unindexedMatch && !isDuplicate(lineNum, `${model}.objects.${op}`)) {
       const field = unindexedMatch[1];
+      const smartIndex = buildSmartIndexForFinding(model, field, args, targetDialect);
       findings.push({
         type: 'UNINDEXED_QUERY',
         severity: 'HIGH',
@@ -546,10 +798,15 @@ function parseMultiLineORMBlocks(
         file: filename,
         line: lineNum,
         table: model.toLowerCase(),
+        column: field,
         querySnippet: djMatch[0].length > 120 ? djMatch[0].substring(0, 120) + '...' : djMatch[0],
-        rawWhy: `Django query on unindexed foreign key (${field}) triggers Postgres sequential scan`,
-        fixSql: `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_${model.toLowerCase()}_${field} ON ${model.toLowerCase()} (${field});`,
-        reproExplain: `EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM ${model.toLowerCase()} WHERE ${field} = $1;`
+        rawWhy: smartIndex.esrOrderExplanation
+          ? `${smartIndex.esrOrderExplanation} Django query on unindexed foreign key (${field}) triggers Postgres sequential scan`
+          : `Django query on unindexed foreign key (${field}) triggers Postgres sequential scan`,
+        fixSql: smartIndex.sql,
+        reproExplain: `EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM ${model.toLowerCase()} WHERE ${field} = $1;`,
+        dialect: dialect,
+        smartIndex
       });
     }
   }
@@ -565,6 +822,7 @@ function parseMultiLineORMBlocks(
 
     if (unindexedMatch && !isDuplicate(lineNum, `session.query(${model})`)) {
       const field = unindexedMatch[1];
+      const smartIndex = buildSmartIndexForFinding(model, field, filterClause, targetDialect);
       findings.push({
         type: 'UNINDEXED_QUERY',
         severity: 'CRITICAL',
@@ -573,10 +831,15 @@ function parseMultiLineORMBlocks(
         file: filename,
         line: lineNum,
         table: model.toLowerCase(),
+        column: field,
         querySnippet: saMatch[0].length > 120 ? saMatch[0].substring(0, 120) + '...' : saMatch[0],
-        rawWhy: `SQLAlchemy multi-line filter on ${model}.${field} causes synchronous database table scan`,
-        fixSql: `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_${model.toLowerCase()}_${field} ON ${model.toLowerCase()} (${field});`,
-        reproExplain: `EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM ${model.toLowerCase()} WHERE ${field} = $1;`
+        rawWhy: smartIndex.esrOrderExplanation
+          ? `${smartIndex.esrOrderExplanation} SQLAlchemy multi-line filter on ${model}.${field} causes synchronous database table scan`
+          : `SQLAlchemy multi-line filter on ${model}.${field} causes synchronous database table scan`,
+        fixSql: smartIndex.sql,
+        reproExplain: `EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM ${model.toLowerCase()} WHERE ${field} = $1;`,
+        dialect: dialect,
+        smartIndex
       });
     }
   }
@@ -592,6 +855,7 @@ function parseMultiLineORMBlocks(
 
     if (unindexedMatch && !isDuplicate(lineNum, `gorm.Where.${op}`)) {
       const field = unindexedMatch[1];
+      const smartIndex = buildSmartIndexForFinding('records', field, whereExpr, targetDialect);
       findings.push({
         type: 'UNINDEXED_QUERY',
         severity: 'HIGH',
@@ -600,10 +864,15 @@ function parseMultiLineORMBlocks(
         file: filename,
         line: lineNum,
         table: 'records',
+        column: field,
         querySnippet: gormMatch[0].length > 120 ? gormMatch[0].substring(0, 120) + '...' : gormMatch[0],
-        rawWhy: `GORM multi-line Where(${field}) query executes unindexed table scan in Go service`,
-        fixSql: `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_records_${field} ON records (${field});`,
-        reproExplain: `EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM records WHERE ${field} = $1;`
+        rawWhy: smartIndex.esrOrderExplanation
+          ? `${smartIndex.esrOrderExplanation} GORM multi-line Where(${field}) query executes unindexed table scan in Go service`
+          : `GORM multi-line Where(${field}) query executes unindexed table scan in Go service`,
+        fixSql: smartIndex.sql,
+        reproExplain: `EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM records WHERE ${field} = $1;`,
+        dialect: dialect,
+        smartIndex
       });
     }
   }
@@ -649,6 +918,64 @@ function parseMultiLineORMBlocks(
         rawWhy: `ActiveRecord multi-line query iterated with .each causes N+1 SQL queries without .includes()`,
         fixSql: `# Use .includes to preload association in ActiveRecord:\n${model}.includes(:association).where(...)`,
         reproExplain: `rails runner "Benchmark.bm { |x| x.report { ${model}.where(...).each { ... } } }"`
+      });
+    }
+  }
+
+  // 7. Raw Parameterized SQL Queries (FastAPI / Flask / Express pg / Go database/sql)
+  const rawSqlRegex = /(?:SELECT|select)\s+[\s\S]+?\s+(?:FROM|from)\s+([a-zA-Z0-9_\.]+)\s+(?:WHERE|where)\s+([\s\S]+?)(?:ORDER\s+BY|order\s+by|GROUP\s+BY|group\s+by|LIMIT|limit|;|"""|'''|`|"|'|\))/g;
+  let sqlMatch: RegExpExecArray | null;
+  while ((sqlMatch = rawSqlRegex.exec(content)) !== null) {
+    let rawTable = sqlMatch[1].trim();
+    if (rawTable.includes('.')) {
+      rawTable = rawTable.split('.').pop() || rawTable;
+    }
+    const whereExpr = sqlMatch[2].trim();
+    const lineNum = getLineNum(sqlMatch.index);
+
+    const colMatch = whereExpr.match(/\b([a-zA-Z0-9_]+)\s*(=|<=|>=|<|>|\bLIKE\b|\bILIKE\b|\bIN\b)/i);
+    if (colMatch && !isDuplicate(lineNum, `${rawTable}.query`)) {
+      const field = colMatch[1];
+      const dialect = schemaData?.dialectInfo?.dialect || 'postgresql';
+      const targetDialect = dialect === 'mysql' || dialect === 'sqlite' ? dialect : 'postgresql';
+      const smartIndex = buildSmartIndexForFinding(rawTable, field, whereExpr, targetDialect);
+
+      // Attempt to resolve which route uses this query
+      let matchedRoute = currentRoute;
+      if (!matchedRoute) {
+        const beforeIdx = content.lastIndexOf('=', sqlMatch.index);
+        if (beforeIdx !== -1) {
+          const varNameMatch = content.slice(Math.max(0, beforeIdx - 40), beforeIdx).match(/([A-Z0-9_]+)\s*$/);
+          if (varNameMatch) {
+            const varName = varNameMatch[1];
+            const usageIdx = content.indexOf(varName, sqlMatch.index + sqlMatch[0].length);
+            if (usageIdx !== -1) {
+              const routeBefore = content.slice(Math.max(0, usageIdx - 600), usageIdx).match(/@(?:app|router)\.(?:get|post|put|delete|patch)\s*\(\s*['"]?([a-zA-Z0-9_\-\/]+)['"]?/i);
+              if (routeBefore) {
+                matchedRoute = routeBefore[1];
+              }
+            }
+          }
+        }
+      }
+
+      findings.push({
+        type: 'UNINDEXED_QUERY',
+        severity: 'CRITICAL',
+        symbol: `${rawTable}.query`,
+        route: matchedRoute || `/api/${rawTable}`,
+        file: filename,
+        line: lineNum,
+        table: rawTable.toLowerCase(),
+        column: field,
+        querySnippet: sqlMatch[0].length > 120 ? sqlMatch[0].substring(0, 120) + '...' : sqlMatch[0],
+        rawWhy: smartIndex.esrOrderExplanation
+          ? `${smartIndex.esrOrderExplanation} Parameterized SQL query filters on unindexed column (${field}) in ${rawTable}`
+          : `Parameterized SQL query filters on unindexed column (${field}) in ${rawTable}`,
+        fixSql: smartIndex.sql,
+        reproExplain: `EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM ${rawTable} WHERE ${field} = $1;`,
+        dialect: dialect,
+        smartIndex
       });
     }
   }

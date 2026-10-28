@@ -1,6 +1,6 @@
 {
   "name": "gitstress",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "Pure CLI and core concurrency bottleneck diagnostic engine for GitStress (npx gitstress .).",
   "type": "module",
   "repository": {
@@ -25,7 +25,7 @@
     "prepublishOnly": "npm run build",
     "cli": "tsx ./bin/gitstress.ts",
     "verify": "tsx ./bin/gitstress.ts verify",
-    "test": "tsx ./gauntlet/runner.ts && tsx test/queuing_network_test.ts && tsx test/multiline_orm_test.ts"
+    "test": "tsx ./gauntlet/runner.ts && tsx test/queuing_network_test.ts && tsx test/multiline_orm_test.ts && tsx test/dialect_intelligence_test.ts && tsx test/multi_tier_evidence_test.ts && tsx test/smart_index_test.ts && tsx test/route_exposure_test.ts"
   },
   "keywords": [
     "gitstress",

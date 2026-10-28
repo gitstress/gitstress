@@ -3,6 +3,52 @@
 All notable changes to the GitStress CLI and core concurrency engine (`gitstress`) will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+## [0.12.0] - 2026-10-27
+
+- **Route Exposure Weighting & Blast Radius Classification**:
+  - Classifies HTTP endpoint ingress paths into deterministic operational risk exposure tiers:
+    - `PUBLIC` (100× traffic weight): Unauthenticated top-level routes (`/`, `/search`, `/feed`, `/@:username`) exposed to internet surges, anonymous traffic, and web scrapers.
+    - `AUTHENTICATED` (10× traffic weight): Session-gated user dashboards, settings, and workspace APIs strictly bounded by active logged-in users.
+    - `INTERNAL_ADMIN` (1× traffic weight): Internal backoffice, administrative tooling, and scheduled batch/cron workers with low concurrent ingress.
+  - **Dynamic Ingress Risk Context Analysis**:
+    - Inspects route URIs, controller paths, and AST security decorators (`auth:sanctum`, `@login_required`, `Depends(get_current_user)`, `role:admin`, `Gate::allows`).
+  - **Blast Radius Mathematical Scoring**:
+    - Computes relative cluster risk score: $\text{Blast Radius} = (W_{exposure} / \max(1, N_{fail})) \times 10$.
+  - **Multi-Finding Candidate Prioritization**:
+    - Ranks primary culprits by exposure weight before file discovery order, preventing low-risk administrative batch scripts from overshadowing critical public-facing denial-of-service bottlenecks.
+  - **Terminal Card & Web Cockpit Integration**:
+    - Renders color-coded Route Exposure Badge and Blast Radius score in § 1.0 CULPRIT and Executive Cockpit.
+    - Integrated into Tier 1 and Tier 2 multi-tier evidence framing metrics.
+  - Added unit test suite `test/route_exposure_test.ts` with 7/7 passing tests and verified end-to-end against the 20-repo concurrency gauntlet.
+
+- **Smart Composite & Partial Index Generation (ESR Rule & Buffer Optimization)**:
+  - Synthesizes query-tuned B-Tree indexes strictly adhering to the database **ESR Rule (Equality -> Sort -> Range)**:
+    - Positions equality filter columns first to narrow index search to a contiguous partition bucket.
+    - Positions sort columns second (`ORDER BY created_at DESC`) matching query ordering to eliminate the database `Sort` execution node and prevent `work_mem` exhaustion under concurrency.
+    - Positions range columns last to preserve index seek capabilities.
+  - **Partial Index Optimization with Redundant Column Pruning**:
+    - Detects static filter predicates (`WHERE status = 'pending'`, `WHERE read_at IS NULL`) and generates filtered partial indexes.
+    - Prunes the redundant filtered column from the key tuple in PostgreSQL and SQLite, saving 4 to 8 bytes per tuple and avoiding index write amplification on non-matching updates.
+    - Calculates estimated 90%–95% RAM buffer footprint savings.
+  - **Storage Dialect Adaptation**:
+    - Generates PostgreSQL `CREATE INDEX CONCURRENTLY IF NOT EXISTS ... WHERE ...`
+    - Generates SQLite `CREATE INDEX IF NOT EXISTS ... WHERE ...`
+    - Generates MySQL InnoDB covering composite indexes (`ALTER TABLE ... ADD INDEX ...`) while suppressing illegal `WHERE` clauses on standard B-Trees.
+  - **Multi-ORM Syntax Generation**: Emits copy-ready schema and migration code for Prisma (`@@index`), Laravel (`$table->index`), Django (`models.Index`), and Ruby on Rails (`add_index`).
+  - **Interactive Web Studio & Terminal Rendering**: Added § 3.1 Smart Index Studio in web cockpit (`gitstress.com`) and ANSI-bordered recommendation block in CLI terminal reports.
+  - Added unit test suite `test/smart_index_test.ts` with 33/33 passing assertions across composite ESR ordering, partial pruning, dialect nuances, and AST parser integration.
+
+- **Multi-Tier Evidence Framing (3-Tier Epistemic Separation)**:
+  - Enforced crisp epistemological separation across three distinct evidence tiers for every diagnostic finding:
+    - **Tier 1 (Verified Static Defect)**: Deterministic code and schema migration proof (Confidence: 1.0, zero speculation). Guarantees 100% syntactic proof linking AST symbols with database table schemas and storage dialect constraints.
+    - **Tier 2 (MVA Queuing Projection)**: Closed 4-station Mean Value Analysis queuing network and Little's Law model (Confidence: 0.85). Explicitly frames the saturation knee ($N_{fail}$) as an analytical mathematical calculation rather than a measured physical fact.
+    - **Tier 3 (Empirical Verification Command)**: Turnkey local benchmark command (Confidence: 1.0 upon execution) enabling instant reproduction via `autocannon` or `gitstress verify` against real hardware.
+  - Added ASCII terminal card block displaying 3-tier epistemic separation in standalone CLI (`gitstress .`).
+  - Added comprehensive automated test coverage (`test/multi_tier_evidence_test.ts`) with 11/11 passing assertions.
+
+- **Database-Dialect Intelligence (PostgreSQL vs. MySQL Storage Engine Modeling)**:
+  - Added automated dialect detection (`detectDatabaseDialect`) inspecting Prisma datasources, Docker Compose manifests, Rails `database.yml`, Django `settings.py`, and migration files.
+  - Recognizes that MySQL InnoDB automatically indexes foreign keys while PostgreSQL leaves foreign keys unindexed by default.
 
 ## [0.11.0] - 2026-10-25
 

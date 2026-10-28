@@ -73,10 +73,10 @@ npx gitstress . --fail-on-fatal
 npx gitstress . --json
 ```
 
----
-
 ## Key Features
 
+* **Multi-Tier Evidence Framing (3-Tier Epistemic Separation)**: Separates findings into three distinct epistemological tiers: Tier 1 (Verified Static Defect, Confidence: 1.0, zero speculation linking AST syntax to schema migrations), Tier 2 (Mathematical Queuing Projection, Confidence: 0.85, modeling Little's Law saturation knees via closed 4-station MVA queuing theory), and Tier 3 (Empirical Verification Command, Confidence: 1.0 upon execution with turnkey `autocannon` / `gitstress verify` commands).
+* **Database-Dialect Intelligence**: Recognizes underlying storage engine constraints (PostgreSQL vs MySQL InnoDB), preventing false positive sequential scan warnings on auto-indexed foreign keys while catching unindexed foreign keys in PostgreSQL.
 * **Instant Culprit Isolation**: Highlights the exact line, AST symbol, and file location where connection pooling, thread pool exhaustion, unindexed queries, or event loop starvation occurs.
 * **Little's Law Saturation Modeling ($L = \lambda W$)**: Calculates physical queue accumulation, concurrency ceilings, and queuing delay propagation across compute stations.
 * **Archival Concurrency Resilience Grade**: Official benchmark rating (A+ through F) based on saturation limits, error rates under load, and recovery characteristics.
@@ -154,6 +154,9 @@ oss/
 │   ├── analyzer_node.ts  # Node.js filesystem walker & boundary enforcer
 │   ├── culprit.ts        # Terminal report rendering & dynamic remediation
 │   ├── queuing_network.ts# Operational Queuing Network & MVA solver
+│   ├── route_exposure.ts # Route exposure weighting & blast radius scoring
+│   ├── smart_index.ts    # ESR-compliant composite & partial index synthesizer
+│   ├── evidence_tiers.ts # 3-tier epistemic separation & verification bridge
 │   ├── verifier.ts       # Physical hardware load verification bridge
 │   ├── github_fetcher.ts # Zero-quota CDN raw streaming & token pooling
 │   ├── types.ts          # Core TypeScript contracts & data types
